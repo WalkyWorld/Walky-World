@@ -1575,3 +1575,53 @@ contract ERC20 is Context, IERC20 {
         uint256 amount
     ) internal virtual {}
 }
+
+pragma solidity ^0.8.12;
+
+contract WalkyBase is Ownable, ERC20 {
+    using SafeMath for uint256;
+
+    bool public autoPumpDumpProtect;
+    uint256 public constant autoPumpDumpProtectDuration = 30 minutes;
+    uint256 public pumpDumpProtectionStamp;
+
+    mapping(address => bool) public _isFeeExempt;
+
+    constructor(string memory name, string memory symbol) ERC20(name, symbol) {
+        autoPumpDumpProtect = true;
+    }
+
+    function checkFeeExempted(address _addr) public view returns (bool) {
+        return _isFeeExempt[_addr];
+    }
+
+    function setFeeExempt(address _addr, bool _value) public onlyOwner {
+        require(
+            _isFeeExempt[_addr] != _value,
+            "WALKY: Value already set for this address"
+        );
+        _isFeeExempt[_addr] = _value;
+        emit SetFeeExempted(_addr, _value);
+    }
+
+    //Incase of accident send bnb to the contract, we can remove that bnb
+    function emergencySweepBNB() public onlyOwner {
+        payable(_msgSender()).transfer(address(this).balance);
+    }
+
+    //Incase of accident send token to the contract, we can remove that token
+    function emergencySweepToken(address _token) public onlyOwner {
+        IERC20(_token).transfer(
+            _msgSender(),
+            IERC20(_token).balanceOf(address(this))
+        );
+    }
+
+    //Incase of accident send NFT to the contract, we can remove that NFT
+    function emergencySweepNFT(address _nft, uint256 _tId) public onlyOwner {
+        IERC721(_nft).transferFrom(address(this), _msgSender(), _tId);
+    }
+
+    event SetFeeExempted(address _addr, bool _value);
+}
+
