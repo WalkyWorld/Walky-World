@@ -1,0 +1,5 @@
+.secret
+./artifacts
+./node_modules
+package-lock.json
+package.json
