@@ -1625,3 +1625,340 @@ contract WalkyBase is Ownable, ERC20 {
     event SetFeeExempted(address _addr, bool _value);
 }
 
+
+pragma solidity ^0.8.12;
+
+contract WalkyWorld is WalkyBase {
+    using SafeMath for uint256;
+    using Address for address;
+
+    bool inSwap;
+
+    modifier swapping() {
+        require(inSwap == false, "ReentrancyGuard: reentrant call");
+        inSwap = true;
+        _;
+        inSwap = false;
+    }
+
+    uint256 public constant maxSupply = 1 * 10**9 * 10**18;
+
+    IUniswapV2Router02 public router;
+    mapping(address => bool) public pairMap;
+
+    bool public initialMarketFinished = false;
+    bool public autoRefillLP;
+
+    uint256 public constant autoRefillLPInterval = 2 days;
+    uint256 public lastLPRefillTime;
+
+    uint256 public constant MAX_FEE_RATE = 150; // 15%
+
+    uint256 public treasuryFee = 30; // 3%
+    uint256 public LPRefillFee = 20; // 2%
+    uint256 public protectionFee = 40; // 4%
+    uint256 public autoBurnFee = 10; // 1%
+
+    uint256 public constant feeFactor = 1000;
+
+    address public treasuryReceiver;
+    address public LPRefillReceiver;
+    address public protectionReceiver;
+    address public autoBurnReceiver;
+
+    address constant DEAD = 0x000000000000000000000000000000000000dEaD;
+    address constant ZERO = 0x0000000000000000000000000000000000000000;
+
+
+    constructor() WalkyBase("WalkyWorld", "WLK") {
+        _mint(_msgSender(), maxSupply);
+        router = IUniswapV2Router02(
+            0x10ED43C718714eb63d5aA57B78B54704E256024E
+        );
+
+        address pair = IUniswapV2Factory(router.factory()).createPair(
+            address(this),
+            router.WETH()
+        );
+
+        pairMap[pair] = true;
+
+        treasuryReceiver = 0xF1a4dbF57102ed0ACf5f4fFF2A1DA6D04975b437;
+        LPRefillReceiver = 0xf5DF6C6cAF9D546d77BD9ab7491E6148b59a8079;
+        protectionReceiver = 0x55dA219Dae772363b7820d23CC8d9d931DAE285B;
+
+        autoRefillLP = true;
+        lastLPRefillTime = block.timestamp;
+
+        _isFeeExempt[_msgSender()] = true;
+        _isFeeExempt[address(this)] = true;
+
+        _approve(address(this), address(router), ~uint256(0));
+    }
+
+    function burn(uint256 amount) public {
+        _burn(_msgSender(), amount);
+    }
+
+    function _basicTransfer(
+        address from, 
+        address to, 
+        uint256 amount
+    ) internal returns (bool) {
+        _balances[from] = _balances[from].sub(amount);
+        _balances[to] = _balances[to].add(amount);
+        emit Transfer(from, to, amount);
+        return true;
+    }
+
+    function _transfer(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal virtual override {
+        require(
+            initialMarketFinished ||
+                _isFeeExempt[sender] ||
+                _isFeeExempt[recipient],
+            "WALKY: Can not trade now, market haven't ready!"
+        );
+
+        if (inSwap) {
+            _basicTransfer(sender, recipient, amount);
+            return;
+        }
+
+        if (shouldRefillLiquidity()) { refillLiquidity(); }
+        if (shouldPackFund()) { packFundToPiggyBank(); }
+
+        uint256 user_receivable = shouldTakeFee(sender, recipient)
+            ? takeFee(sender, recipient, amount)
+            : amount;
+
+        _basicTransfer(sender, recipient, user_receivable);
+    }
+
+    function takeFee(
+        address sender,
+        address recipient,
+        uint256 amount
+    ) internal returns (uint256) {
+        uint256 _treasuryFee = treasuryFee;
+        uint256 _LPRefillFee = LPRefillFee;
+        uint256 _protectionFee = protectionFee;
+        if (pairMap[sender]) {
+            _treasuryFee = 0;
+            _LPRefillFee = 0;
+            _protectionFee = 0;
+        }
+
+        if (shouldPumpDumpProtect(sender, recipient)) { 
+            bool isBuy = pairMap[sender];
+            bool isSell = pairMap[recipient];
+            // bool isTransfer = !(isSell || isBuy);
+
+            uint256 time_since_ld = block.timestamp - pumpDumpProtectionStamp;
+            time_since_ld = pumpDumpProtectionStamp == 0 ? 1 : time_since_ld;
+
+            _protectionFee = time_since_ld > 15 minutes ? (isBuy ? 100 : (isSell ? 200 : 0))
+                            : time_since_ld > 10 minutes ? (isBuy ? 200 : (isSell ? 300 : 0))
+                            : time_since_ld > 5 minutes ? (isBuy ? 300 : (isSell ? 400 : 0))
+                            : (isBuy ? 400 : (isSell ? 500 : 0));
+        }
+
+        uint256 _totalFeeFactor = _treasuryFee.add(_LPRefillFee).add(_protectionFee);
+        uint256 _totalFee = _totalFeeFactor.mul(amount).div(feeFactor);
+        uint256 _burnAmount = autoBurnFee.mul(amount).div(feeFactor);
+
+        if (_totalFee > 0) {
+            _basicTransfer(sender, address(this), _totalFee);
+        }
+        _burn(sender, _burnAmount);
+
+        return amount.sub(_totalFee).sub(_burnAmount);
+    }
+
+    function packFundToPiggyBank() internal swapping {
+        uint256 curFee = balanceOf(address(this));
+        if (curFee == 0) { return; }
+
+        uint256 amountForLPRefill = curFee.mul(LPRefillFee).div(feeFactor);
+        _basicTransfer(address(this), LPRefillReceiver, amountForLPRefill);
+
+        uint256 amountToSwap = curFee.sub(amountForLPRefill);
+
+        uint256 balanceBefore = address(this).balance;
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = router.WETH();
+
+        router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            amountToSwap,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+
+        uint256 amountETHToDistribute = address(this).balance.sub(balanceBefore);
+
+        (bool success, ) = payable(treasuryReceiver).call{
+            value: amountETHToDistribute
+            .mul(treasuryFee)
+            .div(
+                treasuryFee.add(protectionFee)
+            ),
+            gas: 30000
+        }(abi.encodeWithSignature("WALKY: Pack to treasury"));
+        (success, ) = payable(protectionReceiver).call{
+            value: amountETHToDistribute
+            .mul(protectionFee)
+            .div(
+                treasuryFee.add(protectionFee)
+            ),
+            gas: 30000
+        }(abi.encodeWithSignature("WALKY: Pack to protection"));
+    }
+
+    function refillLiquidity() internal swapping {
+        uint256 autoLiquidityAmount = balanceOf(LPRefillReceiver);
+        _basicTransfer(LPRefillReceiver, address(this), autoLiquidityAmount);
+        uint256 amountToLiquify = autoLiquidityAmount.div(2);
+        uint256 amountToSwap = autoLiquidityAmount.sub(amountToLiquify);
+
+        if (amountToSwap == 0) { return; }
+
+        address[] memory path = new address[](2);
+        path[0] = address(this);
+        path[1] = router.WETH();
+
+        uint256 balanceBefore = address(this).balance;
+
+        router.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            amountToSwap,
+            0,
+            path,
+            address(this),
+            block.timestamp
+        );
+
+        uint256 amountETHLiquidity = address(this).balance.sub(balanceBefore);
+
+        if (amountToLiquify > 0 && amountETHLiquidity > 0) {
+            router.addLiquidityETH{value: amountETHLiquidity}(
+                address(this),
+                amountToLiquify,
+                0,
+                0,
+                LPRefillReceiver,
+                block.timestamp
+            );
+        }
+        lastLPRefillTime = block.timestamp;
+    }
+
+    function shouldTakeFee(address sender, address recipient)
+        public
+        view
+        returns (bool)
+    {
+        if (_isFeeExempt[sender] || _isFeeExempt[recipient]) {
+            return false;
+        } else {
+            return pairMap[sender] || pairMap[recipient];
+        }
+    }
+
+    function shouldPackFund() internal view returns (bool) {
+        return !inSwap && !pairMap[_msgSender()];
+    }
+
+    function shouldRefillLiquidity() internal view returns (bool) {
+        return
+            autoRefillLP &&
+            !inSwap &&
+            !pairMap[_msgSender()] &&
+            block.timestamp >= (lastLPRefillTime + autoRefillLPInterval);
+    }
+    
+    function shouldPumpDumpProtect(
+        address sender,
+        address recipient
+    ) public view returns (bool) {
+
+        if (_isFeeExempt[sender] || _isFeeExempt[recipient]) {
+            return false;
+        } else {
+            return autoPumpDumpProtect &&
+            !inSwap &&
+            (pairMap[sender] || pairMap[recipient]) &&
+            block.timestamp <= (pumpDumpProtectionStamp + autoPumpDumpProtectDuration);
+        }
+    }
+
+    function setInitialMarketStart() public onlyOwner {
+        require(
+            pumpDumpProtectionStamp == 0,
+            "WALKY: Pump Dump Protection can only set once"
+        );
+        pumpDumpProtectionStamp = block.timestamp;
+    }
+
+    function setInitialMarketFinished(bool _value) public onlyOwner {
+        require(
+            pumpDumpProtectionStamp != 0,
+            "WALKY: Pump Dump Protection has not been set"
+        );
+        require(
+            initialMarketFinished != _value,
+            "WALKY: Value already set to this boolean"
+        );
+        initialMarketFinished = _value;
+    }
+
+    function setAutoRefillLP(bool _value) public onlyOwner {
+        require(
+            autoRefillLP != _value,
+            "WALKY: Value already set to this boolean"
+        );
+        autoRefillLP = _value;
+    }
+
+    function setReceivers(
+        address _treasuryReceiver, 
+        address _LPRefillReceiver, 
+        address _protectionReceiver
+    ) public onlyOwner {
+        treasuryReceiver = _treasuryReceiver;
+        LPRefillReceiver = _LPRefillReceiver;
+        protectionReceiver = _protectionReceiver;
+    }
+
+    function setFees(
+        uint256 _treasuryFee,
+        uint256 _LPRefillFee,
+        uint256 _protectionFee,
+        uint256 _autoBurnFee
+    ) public onlyOwner {
+        require(
+            _treasuryFee.add(_LPRefillFee).add(_protectionFee).add(_autoBurnFee) <= MAX_FEE_RATE,
+            "WALKY: Total fee rate is too high"
+        );
+
+        treasuryFee = _treasuryFee;
+        LPRefillFee = _LPRefillFee;
+        protectionFee = _protectionFee;
+        autoBurnFee = _autoBurnFee;
+    }
+
+    function setPairContract(address _addr, bool _value) public onlyOwner {
+        require(
+            pairMap[_addr] != _value,
+            "WALKY: Value already set to this address"
+        );
+        pairMap[_addr] = _value;
+    }
+
+    // receivable token
+    receive() external payable {}
+}
