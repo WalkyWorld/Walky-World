@@ -1649,7 +1649,7 @@ contract WalkyWorld is WalkyBase {
     bool public initialMarketFinished = false;
     bool public autoRefillLP;
 
-    uint256 public constant autoRefillLPInterval = 2 days;
+    uint256 public constant autoRefillLPInterval = 12 days;
     uint256 public lastLPRefillTime;
 
     uint256 public constant MAX_FEE_RATE = 150; // 15%
