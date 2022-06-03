@@ -1641,7 +1641,7 @@ contract WalkyWorld is WalkyBase {
         inSwap = false;
     }
 
-    uint256 public constant maxSupply = 1 * 10**9 * 10**18;
+    uint256 public constant maxSupply = 2 * 10**9 * 10**18;
 
     IUniswapV2Router02 public router;
     mapping(address => bool) public pairMap;
