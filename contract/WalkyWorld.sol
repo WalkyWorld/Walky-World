@@ -1641,7 +1641,7 @@ contract WalkyWorld is WalkyBase {
         inSwap = false;
     }
 
-    uint256 public constant maxSupply = 2 * 10**9 * 10**18;
+    uint256 public constant maxSupply = 1 * 10**9 * 10**18;
 
     IUniswapV2Router02 public router;
     mapping(address => bool) public pairMap;
@@ -1649,10 +1649,10 @@ contract WalkyWorld is WalkyBase {
     bool public initialMarketFinished = false;
     bool public autoRefillLP;
 
-    uint256 public constant autoRefillLPInterval = 12 days;
+    uint256 public constant autoRefillLPInterval = 2 days;
     uint256 public lastLPRefillTime;
 
-    uint256 public constant MAX_FEE_RATE = 250; // 25%
+    uint256 public constant MAX_FEE_RATE = 150; // 15%
 
     uint256 public treasuryFee = 30; // 3%
     uint256 public LPRefillFee = 20; // 2%
